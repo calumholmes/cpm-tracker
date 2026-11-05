@@ -13,8 +13,13 @@ There are no tests, linter or build step.
 - Syntax check: `python -m py_compile bot.py`, then delete the `__pycache__` it leaves behind.
 - `bot.py` can't be imported without a valid `config.json`. Module import loads the config, downloads or loads the Vosk model and opens `stats.json`. To test pure functions or classes (`make_game_chart`, `biggest_loser`, `Player`, `Session._enter_game` and so on), extract them with `ast` and run them with stubbed `STATS`/`CFG`/`discord` instead of importing the module.
 
+## Configuration
+- Secrets come from `.env` (loaded with python-dotenv) or from real environment variables, which take precedence: `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. The committed template is `.env.example`. On first run with no token, `load_config` copies it to `.env` and exits.
+- Settings come from optional `config.json` overrides on top of `DEFAULT_CONFIG`. The committed template is `config.example.json`, which must contain exactly the `DEFAULT_CONFIG` keys and values. Update both together. Unknown keys are warned about and ignored.
+- For backward compatibility, a `token`/`guild_id` in an older `config.json` is still honoured (with a warning) when the env vars are unset.
+
 ## Private files (gitignored: never read, print or commit them)
-- `config.json` holds the Discord bot **token** and server ID. It's created from `DEFAULT_CONFIG` on first run, and `load_config` merges new defaults into older files.
+- `.env` holds the Discord bot **token** and server ID. `config.json` holds local settings and, on older setups, the token too.
 - `stats.json` holds real people's Discord display names and user IDs, plus lifetime totals, the all-time `games` list and a crash-recovery `session` snapshot.
 - `models/` holds the auto-downloaded Vosk model (`vosk-model-small-en-us-0.15`). `.venv/` is the local virtual environment.
 

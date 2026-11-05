@@ -10,6 +10,8 @@ import asyncio
 import io
 import json
 import logging
+import os
+import shutil
 import threading
 import time
 import urllib.request
@@ -23,18 +25,20 @@ import matplotlib.pyplot as plt
 import discord
 from discord import app_commands
 from discord.ext import voice_recv
+from dotenv import load_dotenv
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
 HERE = Path(__file__).resolve().parent
-CONFIG_PATH = HERE / "config.json"
+ENV_PATH = HERE / ".env"                    # secrets: DISCORD_TOKEN, DISCORD_GUILD_ID (gitignored)
+ENV_EXAMPLE_PATH = HERE / ".env.example"
+CONFIG_PATH = HERE / "config.json"          # optional settings overrides (see config.example.json)
 STATS_PATH = HERE / "stats.json"
 MODELS_DIR = HERE / "models"
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 
+# Settings (not secrets). Override any of these in config.json; keep config.example.json in sync.
 DEFAULT_CONFIG = {
-    "token": "PASTE_YOUR_BOT_TOKEN_HERE",
-    "guild_id": None,
     "trigger_words": ["chest", "chests"],
     "min_confidence": 0.6,
     "drop_window_minutes": 3,
@@ -58,12 +62,43 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # --------------------------------------------------------------------------- config / storage
 
 def load_config() -> dict:
-    if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
-        raise SystemExit(f"Created {CONFIG_PATH.name}. Paste your bot token into it, then run again.")
-    cfg = {**DEFAULT_CONFIG, **json.loads(CONFIG_PATH.read_text())}
-    if not cfg["token"] or cfg["token"].startswith("PASTE_"):
-        raise SystemExit(f"Put your bot token in {CONFIG_PATH.name} first.")
+    """Secrets from .env (or real environment variables); settings from config.json over the defaults."""
+    load_dotenv(ENV_PATH)  # never overrides variables already set in the environment
+
+    file_cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            file_cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except ValueError as e:
+            raise SystemExit(f"{CONFIG_PATH.name} isn't valid JSON: {e}")
+    unknown = set(file_cfg) - set(DEFAULT_CONFIG) - {"token", "guild_id"}
+    if unknown:
+        log.warning("Ignoring unknown settings in %s: %s", CONFIG_PATH.name, ", ".join(sorted(unknown)))
+    cfg = {**DEFAULT_CONFIG, **{k: v for k, v in file_cfg.items() if k in DEFAULT_CONFIG}}
+
+    token = os.getenv("DISCORD_TOKEN", "").strip()
+    guild = os.getenv("DISCORD_GUILD_ID", "").strip()
+    # Older setups kept these in config.json. Still honoured, but .env is preferred.
+    legacy_token = str(file_cfg.get("token") or "")
+    if not token and legacy_token and not legacy_token.startswith("PASTE_"):
+        token = legacy_token
+        log.warning("Reading the bot token from config.json still works, but please move it to .env "
+                    "as DISCORD_TOKEN (see .env.example) and remove it from config.json.")
+    if not guild and file_cfg.get("guild_id"):
+        guild = str(file_cfg["guild_id"]).strip()
+
+    if not token:
+        if not ENV_PATH.exists() and ENV_EXAMPLE_PATH.exists():
+            shutil.copyfile(ENV_EXAMPLE_PATH, ENV_PATH)
+            raise SystemExit(f"Created {ENV_PATH.name}. Open it, paste your bot token after DISCORD_TOKEN=, "
+                             f"then run again.")
+        raise SystemExit(f"No bot token found. Put it in {ENV_PATH.name} as DISCORD_TOKEN=... "
+                         f"(see {ENV_EXAMPLE_PATH.name}).")
+    if guild and not guild.isdigit():
+        raise SystemExit("DISCORD_GUILD_ID must be your server's numeric ID (or left empty).")
+
+    cfg["token"] = token
+    cfg["guild_id"] = int(guild) if guild else None
     cfg["trigger_words"] = [w.lower().strip() for w in cfg["trigger_words"] if w.strip()]
     return cfg
 

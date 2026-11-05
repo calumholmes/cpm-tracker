@@ -1,0 +1,12 @@
+{
+  "trigger_words": ["chest", "chests"],
+  "min_confidence": 0.6,
+  "voice_commands": true,
+  "session_gap_minutes": 60,
+  "drop_window_minutes": 3,
+  "drop_ratio": 0.4,
+  "drop_min_active_minutes": 4,
+  "drop_min_chests": 4,
+  "min_best_minutes": 3,
+  "board_update_seconds": 10
+}

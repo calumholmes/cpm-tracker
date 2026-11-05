@@ -1,5 +1,8 @@
 # --- Private: never commit these ---
-# Bot token and server ID
+# Bot token and server ID (.env.example is the committed template)
+.env
+# Your local settings (config.example.json is the committed template).
+# Older setups may also have the token in here.
 config.json
 # Everyone's Discord names, user IDs and game history
 stats.json

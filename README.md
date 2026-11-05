@@ -74,23 +74,24 @@ You can also download the ZIP and extract it.
 - **Windows:** double-click `run.bat`
 - **macOS / Linux:** run `./run.sh` in a terminal
 
-The first run installs everything, which takes a few minutes. It then creates a `config.json` file and stops.
+The first run installs everything, which takes a few minutes. It then creates a `.env` file (a copy of
+`.env.example`) and stops.
 
 ### 5. Add your token
 
-Open `config.json` in any text editor and paste in your token:
+Open `.env` in any text editor and fill it in:
 
-```json
-{
-  "token": "paste-your-bot-token-here",
-  "guild_id": "your-server-id-here",
-  ...
-}
+```ini
+DISCORD_TOKEN=paste-your-bot-token-here
+DISCORD_GUILD_ID=your-server-id-here
 ```
 
-`guild_id` is optional but recommended. With it, the slash commands appear in your server right away instead
-of after a delay. To find it, turn on **Developer Mode** in Discord (**User Settings → Advanced**), then
-right-click your server icon and choose **Copy Server ID**.
+No quotes or spaces are needed. `DISCORD_GUILD_ID` is optional but recommended. With it, the slash commands
+appear in your server right away instead of after a delay. To find it, turn on **Developer Mode** in Discord
+(**User Settings → Advanced**), then right-click your server icon and choose **Copy Server ID**.
+
+You can also set `DISCORD_TOKEN` and `DISCORD_GUILD_ID` as ordinary environment variables instead of using
+`.env`, which is handy on a server. Real environment variables take priority over `.env`.
 
 ### 6. Start it
 
@@ -150,12 +151,20 @@ Leave that window open while you play. Close it, or press `Ctrl+C`, to stop the 
 
 ## Configuration
 
-All settings live in `config.json`. Restart the bot after changing them.
+There are two files:
+
+- **`.env`** holds your secrets: `DISCORD_TOKEN` (required) and `DISCORD_GUILD_ID` (optional). See
+  [step 5](#5-add-your-token).
+- **`config.json`** holds optional settings. The bot works fine without it. To change something, copy
+  `config.example.json` to `config.json` and edit the values. You can delete any line you don't want to
+  change, and the default is used. Restart the bot after editing.
+
+```bash
+cp config.example.json config.json      # Windows: copy config.example.json config.json
+```
 
 | Setting | Default | What it does |
 |---|---|---|
-| `token` | none | Your bot token (required). |
-| `guild_id` | `null` | Your server ID, so slash commands appear instantly. |
 | `trigger_words` | `["chest", "chests"]` | Words that count as a chest. |
 | `min_confidence` | `0.6` | How sure the recogniser must be (0 to 1). Raise it if you get false counts. Lower it if real ones are missed. |
 | `voice_commands` | `true` | Set to `false` to turn off "start game" / "end game" and use the slash commands only. |
@@ -178,8 +187,9 @@ All settings live in `config.json`. Restart the bot after changing them.
 - **What is saved** (in `stats.json`, on your computer only): each player's Discord display name and user ID,
   their chest counts and play time, and a summary of each game.
 - **Tell your friends the bot is listening** before you use it.
-- `config.json` (your token) and `stats.json` (your friends' data) are listed in `.gitignore`, so they won't be
-  committed if you fork this repository.
+- `.env` (your token), `config.json` (your settings) and `stats.json` (your friends' data) are listed in
+  `.gitignore`, so they won't be committed if you fork this repository. Only the `*.example` templates are
+  committed.
 
 ---
 
@@ -187,8 +197,10 @@ All settings live in `config.json`. Restart the bot after changing them.
 
 | Problem | Try this |
 |---|---|
-| Slash commands don't appear | Set `guild_id` in `config.json` and restart. Without it, Discord can take a while to show new commands. |
-| `Put your bot token in config.json first` | Paste your token into `config.json`, keeping the quotes. |
+| Slash commands don't appear | Set `DISCORD_GUILD_ID` in `.env` and restart. Without it, Discord can take a while to show new commands. |
+| `No bot token found` | Paste your token after `DISCORD_TOKEN=` in `.env`, then save it. |
+| `config.json isn't valid JSON` | Check for a missing comma or quote, or delete `config.json` to use the defaults. |
+| A warning about reading the token from `config.json` | Your setup predates `.env`. Move the token into `.env` as `DISCORD_TOKEN=...`, then delete the `token` and `guild_id` lines from `config.json`. |
 | Installing dependencies fails | Make sure **Git** is installed and on your PATH, then run the launcher again. |
 | The bot joins voice but never counts anything | Check the bot window for errors. Voice receiving depends on a community package (see below). Updating it often fixes this: delete the `.venv` folder and run the launcher again. |
 | Too many false counts | Raise `min_confidence` (for example `0.75`), and make sure game audio isn't leaking into your mics. Use `/undo` to correct counts. |
@@ -219,6 +231,9 @@ All settings live in `config.json`. Restart the bot after changing them.
 | `bot.py` | The bot. |
 | `requirements.txt` | Python dependencies. |
 | `run.bat` / `run.sh` | Launchers that set everything up and start the bot. |
-| `config.json` | Your settings and token. Created on first run and **not committed**. |
+| `.env.example` | Template for `.env`. |
+| `config.example.json` | Template for `config.json`, listing every setting with its default. |
+| `.env` | Your bot token and server ID. Created on first run and **not committed**. |
+| `config.json` | Your optional setting overrides. **Not committed**. |
 | `stats.json` | Saved stats. Created automatically and **not committed**. |
 | `models/` | The downloaded speech model. Not committed. |

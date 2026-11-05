@@ -5,3 +5,4 @@ PyNaCl
 vosk
 numpy
 matplotlib
+python-dotenv
