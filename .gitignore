@@ -1,0 +1,20 @@
+# --- Private: never commit these ---
+# Bot token and server ID
+config.json
+# Everyone's Discord names, user IDs and game history
+stats.json
+stats.tmp
+
+# --- Generated / downloaded ---
+.venv/
+models/
+__pycache__/
+*.pyc
+
+# --- Local tool / editor settings ---
+.claude/
+CLAUDE.local.md
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+# Voice-receive extension with Discord DAVE (voice encryption) support.
+# It installs the matching discord.py fork automatically.
+git+https://github.com/zacker150/discord-ext-voice-recv
+PyNaCl
+vosk
+numpy
+matplotlib
