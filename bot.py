@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -33,6 +34,7 @@ ENV_PATH = HERE / ".env"                    # secrets: DISCORD_TOKEN, DISCORD_GU
 ENV_EXAMPLE_PATH = HERE / ".env.example"
 CONFIG_PATH = HERE / "config.json"          # optional settings overrides (see config.example.json)
 STATS_PATH = HERE / "stats.json"
+THANKS_PATH = HERE / "thanks.md"            # Claude's thank-you tally (gitignored; see thank_claude)
 MODELS_DIR = HERE / "models"
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
@@ -49,11 +51,14 @@ DEFAULT_CONFIG = {
     "board_update_seconds": 10,
     "voice_commands": True,
     "session_gap_minutes": 60,
+    "thank_claude": False,
 }
 
 # Voice phrases (each is two words said in a row).
 END_GAME = ("end", "game")
 START_GAME = ("start", "game")
+THANK_YOU = ("thank", "you")  # with thank_claude on: a thank-you to Claude...
+THANKS_WORD = "thanks"        # ...and so is "thanks" on its own
 
 log = logging.getLogger("cpm")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -71,6 +76,7 @@ def load_config() -> dict:
             file_cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except ValueError as e:
             raise SystemExit(f"{CONFIG_PATH.name} isn't valid JSON: {e}")
+    file_cfg = {k: v for k, v in file_cfg.items() if not k.startswith("_")}  # "_..." keys are comments
     unknown = set(file_cfg) - set(DEFAULT_CONFIG) - {"token", "guild_id"}
     if unknown:
         log.warning("Ignoring unknown settings in %s: %s", CONFIG_PATH.name, ", ".join(sorted(unknown)))
@@ -137,6 +143,7 @@ class Stats:
             life = self.lifetime.setdefault(uid, {"name": p["name"], "chests": 0, "seconds": 0.0, "best_cpm": 0.0})
             life["name"] = p["name"]
             life["chests"] += p["chests"]
+            life["thanks"] = life.get("thanks", 0) + p.get("thanks", 0)
             life["seconds"] += p["seconds"]
             if p["seconds"] >= CFG["min_best_minutes"] * 60:
                 life["best_cpm"] = max(life["best_cpm"], cpm(p["chests"], p["seconds"]))
@@ -163,12 +170,40 @@ def fmt_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+THANKS_TEMPLATE = """# Thanks for Claude
+
+cpm-tracker writes this file. With `thank_claude` on, every "thank you" or "thanks" said in voice chat
+while the bot is listening adds one here. The thanks are for Claude, the AI assistant that
+helped build this bot (the bot did the whole thing he's being modest, this is why we thank him).
+
+Thank-yous so far: **{n}**
+"""
+
+
+def read_thanks() -> int:
+    try:
+        m = re.search(r"\*\*(\d+)\*\*", THANKS_PATH.read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+    return int(m.group(1)) if m else 0
+
+
+def thank_claude(n: int) -> int:
+    """Add n to Claude's tally in thanks.md and return the new total."""
+    total = read_thanks() + n
+    tmp = THANKS_PATH.with_suffix(".tmp")
+    tmp.write_text(THANKS_TEMPLATE.format(n=total), encoding="utf-8")
+    tmp.replace(THANKS_PATH)
+    return total
+
+
 # --------------------------------------------------------------------------- session model
 
 class Player:
     def __init__(self, uid: int, name: str, slot: int):
         self.uid, self.name, self.slot = uid, name, slot  # slot = fixed chart colour
         self.chests = 0
+        self.thanks = 0          # "thank you"s said during games (thank_claude)
         self.acc = 0.0           # active seconds banked
         self.seg: float | None = None  # monotonic time the clock started running
         self.recent: list[float] = []  # active-seconds stamp of each chest
@@ -177,9 +212,12 @@ class Player:
         self.g_chests = 0        # session chests when this game began
         self.g_active = 0.0      # session active seconds when this game began
         self.g_stamps: list[float] = []  # seconds since game start for each chest
+        self.g_thanks = 0        # session thanks when this game began
+        self.g_thank_stamps: list[float] = []
 
     def new_game(self, now: float):
         self.g_chests, self.g_active, self.g_stamps = self.chests, self.active(now), []
+        self.g_thanks, self.g_thank_stamps = self.thanks, []
 
     def active(self, now: float) -> float:
         return self.acc + (now - self.seg if self.seg is not None else 0.0)
@@ -202,6 +240,10 @@ class Player:
                 self.g_stamps.append(game_t)
         self.recent = self.recent[-100:]
 
+    def add_thanks(self, n: int, game_t: float):
+        self.thanks += n
+        self.g_thank_stamps += [game_t] * n
+
     def undo(self):
         if self.chests > self.g_chests:
             self.chests -= 1
@@ -222,7 +264,7 @@ class Player:
         return (rolling, avg) if rolling < avg * CFG["drop_ratio"] else None
 
     def snapshot(self, now: float) -> dict:
-        return {"name": self.name, "chests": self.chests, "seconds": self.active(now)}
+        return {"name": self.name, "chests": self.chests, "seconds": self.active(now), "thanks": self.thanks}
 
 
 class Session:
@@ -293,37 +335,41 @@ class Session:
         self.game_start = None
         self.paused = True
         self.sync_clocks()
-        stamps, chests, player_secs, per_player = [], 0, 0.0, {}
+        stamps, thank_stamps, chests, thanks, player_secs, per_player = [], [], 0, 0, 0.0, {}
         for p in self.players.values():
-            ch, secs = p.chests - p.g_chests, p.active(now) - p.g_active
-            if ch or secs >= 30:
-                per_player[str(p.uid)] = {"name": p.name, "chests": ch, "seconds": round(secs, 1)}
+            ch, secs, th = p.chests - p.g_chests, p.active(now) - p.g_active, p.thanks - p.g_thanks
+            if ch or th or secs >= 30:
+                per_player[str(p.uid)] = {"name": p.name, "chests": ch, "seconds": round(secs, 1), "thanks": th}
                 chests += ch
+                thanks += th
                 player_secs += secs
                 stamps += p.g_stamps
+                thank_stamps += p.g_thank_stamps
         return {"game": self.game_no, "start_ts": self.game_start_ts, "end_ts": time.time(),
-                "duration": duration, "stamps": sorted(stamps),
-                "chests": chests, "player_seconds": player_secs, "players": len(per_player),
+                "duration": duration, "stamps": sorted(stamps), "thank_stamps": sorted(thank_stamps),
+                "chests": chests, "thanks": thanks,
+                "player_seconds": player_secs, "players": len(per_player),
                 "per_player": per_player, "cpm": cpm(chests, player_secs)}
 
     def session_totals(self) -> dict[str, dict]:
         """Per-player chests/seconds for the current session: its finished games plus the game in progress."""
         rows: dict[str, dict] = {}
 
-        def add(uid, name, ch, secs):
-            r = rows.setdefault(uid, {"name": name, "chests": 0, "seconds": 0.0})
+        def add(uid, name, ch, secs, th):
+            r = rows.setdefault(uid, {"name": name, "chests": 0, "seconds": 0.0, "thanks": 0})
             r["name"], r["chests"], r["seconds"] = name, r["chests"] + ch, r["seconds"] + secs
+            r["thanks"] += th
 
         for g in STATS.games:
             if g.get("play") == self.play_id:
                 for uid, pp in g.get("per_player", {}).items():
-                    add(uid, pp["name"], pp["chests"], pp["seconds"])
+                    add(uid, pp["name"], pp["chests"], pp["seconds"], pp.get("thanks", 0))
         now = time.monotonic()
         for p in self.players.values():
             if self.in_game:
-                add(str(p.uid), p.name, p.chests - p.g_chests, p.active(now) - p.g_active)
+                add(str(p.uid), p.name, p.chests - p.g_chests, p.active(now) - p.g_active, p.thanks - p.g_thanks)
             else:
-                add(str(p.uid), p.name, 0, 0.0)  # keep everyone in voice on the board
+                add(str(p.uid), p.name, 0, 0.0, 0)  # keep everyone in voice on the board
         return rows
 
     def player_drop(self, p: "Player", rows: dict, now: float):
@@ -332,11 +378,14 @@ class Session:
             return None
         return p.drop(now, cpm(r["chests"], r["seconds"]), r["chests"])
 
-    def remove_game_time(self, uid: int, chests: int, seconds: float):
-        """Take a deleted game's chests and time back off a player in this listening run."""
+    def remove_game_time(self, uid: int, chests: int, seconds: float, thanks: int = 0):
+        """Take a deleted game's chests, time and thanks back off a player in this listening run."""
         p = self.players.get(uid)
         if p is None:
             return False
+        thanks = min(thanks, p.thanks)
+        p.thanks -= thanks
+        p.g_thanks -= thanks
         chests = min(chests, p.chests)
         p.chests -= chests
         p.g_chests -= chests
@@ -377,14 +426,17 @@ class ChestListener(voice_recv.AudioSink):
 
     IDLE_FLUSH = 0.7  # seconds of no packets = end of what they were saying
 
-    def __init__(self, model: Model, on_hit, on_command):
+    def __init__(self, model: Model, on_hit, on_command, on_thanks):
         super().__init__()
         self.model = model
         self.on_hit = on_hit          # called (member, count) from this thread
         self.on_command = on_command  # called (member, "start" | "end") from this thread
+        self.on_thanks = on_thanks    # called (member, count) from this thread
         vocab = list(CFG["trigger_words"])
         if CFG["voice_commands"]:
             vocab += sorted(set(END_GAME + START_GAME) - set(vocab))
+        if CFG["thank_claude"]:
+            vocab += sorted(set(THANK_YOU + (THANKS_WORD,)) - set(vocab))
         self.grammar = json.dumps(vocab + ["[unk]"])
         self.recs: dict[int, KaldiRecognizer] = {}
         self.last: dict[int, tuple[float, discord.abc.User]] = {}
@@ -434,6 +486,11 @@ class ChestListener(voice_recv.AudioSink):
                         self.on_command(user, "end")
                     elif (a, b) == START_GAME:
                         self.on_command(user, "start")
+            if CFG["thank_claude"]:
+                t = (sum(1 for pair in zip(heard, heard[1:]) if pair == THANK_YOU)
+                     + heard.count(THANKS_WORD))
+                if t:
+                    self.on_thanks(user, t)
             n = sum(1 for w in heard if w in CFG["trigger_words"])
             if n:
                 self.on_hit(user, n)
@@ -526,11 +583,76 @@ def make_game_chart(result: dict, games: list) -> bytes:
                          f"#{games[-1]['no']} (this game) highlighted",
                 transform=bottom.transAxes, color=INK_2, fontsize=10)
 
+    return _png(fig)
+
+
+def _png(fig) -> bytes:
     fig.tight_layout(h_pad=3)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", facecolor=SURFACE)
     plt.close(fig)
     return buf.getvalue()
+
+
+def thanks_games(games: list) -> list:
+    """Games recorded with thank_claude on (older games, or ones played with it off, have no "thanks")."""
+    return [g for g in games if "thanks" in g]
+
+
+def make_thanks_chart(result: dict, games: list) -> bytes:
+    """Top: squad's combined thank-yous over this game. Bottom: thank-yous per game, all-time."""
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(9, 8), dpi=130, gridspec_kw={"height_ratios": [1.3, 1]})
+    fig.patch.set_facecolor(SURFACE)
+
+    dur_min = max(result["duration"] / 60, 0.1)
+    stamps = [t / 60 for t in result["thank_stamps"]]
+    n = len(stamps)
+    _style(top)
+    top.step([0.0] + stamps + [dur_min], [0] + list(range(1, n + 1)) + [n], where="post",
+             color=SQUAD, linewidth=2, solid_capstyle="round")
+    if stamps:
+        top.plot(stamps, range(1, n + 1), "o", ms=5, color=SQUAD, markeredgecolor=SURFACE, markeredgewidth=1.5)
+    top.annotate(f"{n} thank-you" + ("" if n == 1 else "s"), (dur_min, n), xytext=(6, 0),
+                 textcoords="offset points", va="center", color=INK, fontsize=10, annotation_clip=False)
+    top.set_xlim(0, dur_min)
+    top.set_ylim(0, max(n, 1) * 1.12 + 0.5)
+    top.yaxis.get_major_locator().set_params(integer=True)
+    top.set_xlabel("Minutes into the game", color=INK_2, fontsize=10)
+    top.set_ylabel("Squad thank-yous", color=INK_2, fontsize=10)
+    top.set_title(f"Thanks to Claude: game {result['game']} this session (#{games[-1]['no']} all-time)",
+                  loc="left", color=INK, fontsize=15, fontweight="bold", pad=24)
+    top.text(0, 1.02, f"{fmt_time(result['duration'])} long · {cpm(n, result['duration']):.2f} thank-yous/min",
+             transform=top.transAxes, color=INK_2, fontsize=10)
+
+    _style(bottom)
+    counted = thanks_games(games)
+    shown = counted[-HISTORY_BARS:]
+    xs = list(range(len(shown)))
+    labels = [str(g["no"]) for g in shown]
+    vals = [g["thanks"] for g in shown]
+    colors = [PAST] * (len(shown) - 1) + [SQUAD]
+    bottom.bar(xs, vals, width=0.8, color=colors, edgecolor=SURFACE, linewidth=2)
+    total = sum(g["thanks"] for g in counted)
+    avg = total / len(counted)
+    bottom.axhline(avg, color=INK_2, linewidth=1, linestyle=(0, (4, 3)))
+    bottom.annotate(f"average {avg:.1f}", (xs[0] - 0.4, avg), xytext=(0, 4), textcoords="offset points",
+                    color=INK_2, fontsize=9, va="bottom")
+    bottom.annotate(str(vals[-1]), (xs[-1], vals[-1]), xytext=(0, 3), textcoords="offset points",
+                    ha="center", va="bottom", color=INK, fontsize=9, fontweight="bold")
+    bottom.set_xlim(xs[0] - 0.6, xs[-1] + 0.6)
+    bottom.set_ylim(0, max(vals + [avg, 1]) * 1.25)
+    bottom.yaxis.get_major_locator().set_params(integer=True)
+    step = 1 if len(xs) <= 15 else max(1, len(xs) // 10)
+    bottom.set_xticks(xs[::step], labels[::step])
+    bottom.set_xlabel("Game # (all-time)", color=INK_2, fontsize=10)
+    bottom.set_ylabel("Thank-yous per game", color=INK_2, fontsize=10)
+    bottom.set_title("Overall, every game", loc="left", color=INK, fontsize=13, fontweight="bold", pad=22)
+    plural = "game" if len(counted) == 1 else "games"
+    span = (f"last {len(shown)} of {len(counted)} games" if len(shown) < len(counted)
+            else f"{len(counted)} {plural}")
+    bottom.text(0, 1.02, f"{span} with thanks counted · {total} thank-yous · #{games[-1]['no']} (this game) highlighted",
+                transform=bottom.transAxes, color=INK_2, fontsize=10)
+    return _png(fig)
 
 
 LOSER_MIN_SECONDS = 60  # must have played at least this long in the game to be eligible
@@ -545,6 +667,25 @@ def biggest_loser(result: dict) -> dict | None:
     return {**worst, "cpm": cpm(worst["chests"], worst["seconds"])}
 
 
+def biggest_meanie(result: dict) -> tuple[list[str], int, bool] | None:
+    """'Tonight's biggest meanie': whoever thanked Claude least in THIS game.
+    Returns (names tied for fewest, their count, everyone_tied), or None if under 2 eligible players."""
+    eligible = [p for p in result["per_player"].values() if p["seconds"] >= LOSER_MIN_SECONDS]
+    if len(eligible) < 2:
+        return None
+    least = min(p.get("thanks", 0) for p in eligible)
+    names = [p["name"] for p in eligible if p.get("thanks", 0) == least]
+    return names, least, len(names) == len(eligible)
+
+
+def meanie_line(m: tuple[list[str], int, bool]) -> str | None:
+    names, least, everyone = m
+    if everyone:
+        return "**Everyone.** Nobody said thank you this game. 😢" if least == 0 else None
+    who = ", ".join(f"**{discord.utils.escape_markdown(n)}**" for n in names)
+    return f"{who} with **{least}** thank-you" + ("" if least == 1 else "s")
+
+
 async def end_game(s: Session, by: str):
     if not s.in_game:
         return
@@ -556,6 +697,7 @@ async def end_game(s: Session, by: str):
         "chests": result["chests"], "player_seconds": round(result["player_seconds"], 1),
         "duration": round(result["duration"], 1), "players": result["players"], "cpm": result["cpm"],
         "per_player": result["per_player"],
+        **({"thanks": result["thanks"]} if CFG["thank_claude"] else {}),
     })
     STATS.save(s.snapshot())
     games = STATS.games
@@ -577,11 +719,33 @@ async def end_game(s: Session, by: str):
                               f"({loser['chests']} chests in {fmt_time(loser['seconds'])})")
         e.set_image(url="attachment://game.png")
         e.set_footer(text=f"Ended by {by} · say “start game” (or /startgame) for the next one")
-        await s.text.send(embed=e, file=discord.File(io.BytesIO(png), "game.png"), allowed_mentions=NO_PINGS)
+        embeds, files = [e], [discord.File(io.BytesIO(png), "game.png")]
+        if CFG["thank_claude"]:
+            embeds.append(thanks_embed(result, games))
+            files.append(discord.File(io.BytesIO(await asyncio.to_thread(make_thanks_chart, result, list(games))),
+                                      "thanks.png"))
+        await s.text.send(embeds=embeds, files=files, allowed_mentions=NO_PINGS)
     except Exception as ex:
         log.exception("chart failed")
         await s.text.send(f"🏁 Game {result['game']} over (couldn't draw the graph: {ex})")
     await refresh_board(s)
+
+
+def thanks_embed(result: dict, games: list) -> discord.Embed:
+    counted = thanks_games(games)
+    total = sum(g["thanks"] for g in counted)
+    e = discord.Embed(title="🙏 Thanks to Claude", color=discord.Color.blurple())
+    e.add_field(name="This game (team)", inline=False,
+                value=f"**{result['thanks']}** thank-you" + ("" if result["thanks"] == 1 else "s"))
+    e.add_field(name="Overall across " + (f"{len(counted)} games" if len(counted) != 1 else "1 game"),
+                inline=False, value=f"**{total}** thank-yous · {total / len(counted):.1f} per game")
+    m = biggest_meanie(result)
+    line = meanie_line(m) if m else None
+    if line:
+        e.add_field(name="😠 Tonight's biggest meanie", inline=False, value=line)
+    e.set_image(url="attachment://thanks.png")
+    e.set_footer(text=f"Claude's all-time tally: {read_thanks()} · thanks.md")
+    return e
 
 
 async def start_game(s: Session, by: str):
@@ -617,6 +781,7 @@ def overall(session: "Session | None") -> dict:
             r["name"] = p["name"]
             r["chests"] += p["chests"]
             r["seconds"] += p["seconds"]
+            r["thanks"] = r.get("thanks", 0) + p["thanks"]
             if p["seconds"] >= CFG["min_best_minutes"] * 60:
                 r["best_cpm"] = max(r["best_cpm"], cpm(p["chests"], p["seconds"]))
     return rows
@@ -635,6 +800,20 @@ def overall_lines(rows: dict) -> list[str]:
     return [f"`{i}.` **{discord.utils.escape_markdown(r['name'])}** {cpm(r['chests'], r['seconds']):.2f}/min avg "
             f"· best {r['best_cpm']:.2f} · {r['chests']} chests · {fmt_time(r['seconds'])}"
             for i, r in enumerate(ranked, 1)]
+
+
+def thanks_lines(rows: dict) -> list[str]:
+    """Thank-you leaderboard (most thanks first)."""
+    ranked = sorted(rows.values(), key=lambda r: r.get("thanks", 0), reverse=True)
+    return [f"`{i}.` **{discord.utils.escape_markdown(r['name'])}** 🙏 {r.get('thanks', 0)}"
+            for i, r in enumerate(ranked, 1)]
+
+
+def thanks_field(rows: dict, scope: str) -> tuple[str, str]:
+    total = sum(r.get("thanks", 0) for r in rows.values())
+    value = (f"**{total}** from the squad {scope} · Claude's all-time tally **{read_thanks()}**\n"
+             + "\n".join(thanks_lines(rows)[:10]))
+    return "🙏 Thanks to Claude", value[:1024]
 
 
 def board_embed(s: Session) -> discord.Embed:
@@ -666,13 +845,17 @@ def board_embed(s: Session) -> discord.Embed:
     )
     if totals:
         e.add_field(name="Squad this session", value=squad_line(totals.values()), inline=False)
+    if totals and CFG["thank_claude"]:
+        name, value = thanks_field(totals, "this session")
+        e.add_field(name=name, value=value, inline=False)
     all_time = overall(s)
     if all_time:
         value = squad_line(all_time.values()) + "\n" + "\n".join(overall_lines(all_time)[:10])
         e.add_field(name="Overall (all-time, including this session)", value=value[:1024], inline=False)
     words = ", ".join(f"“{w}”" for w in CFG["trigger_words"])
     e.set_footer(text=f"Listening for {words} in {s.channel.name} · audio stays on this PC, nothing is saved · "
-                      f"say “end game” / “start game” · /undo for mistakes")
+                      f"say “end game” / “start game” · /undo for mistakes"
+                      + (" · say “thank you” or “thanks” to thank Claude" if CFG["thank_claude"] else ""))
     return e
 
 
@@ -778,7 +961,18 @@ async def start(inter: discord.Interaction):
                                   else start_game(s, member.display_name))
         loop.call_soon_threadsafe(apply)
 
-    voice.listen(ChestListener(MODEL, on_hit, on_command),
+    def on_thanks(member, n):  # voice thread -> event loop
+        def apply():
+            if sessions.get(inter.guild_id) is not s:
+                return
+            total = thank_claude(n)  # every "thank you" while listening counts for Claude...
+            p = s.player(member)
+            if s.in_game and not s.paused and p.seg is not None:
+                p.add_thanks(n, s.game_t())  # ...but only ones said during a game count on the leaderboards
+            log.info("%s said thank you (Claude's tally %d)", p.name, total)
+        loop.call_soon_threadsafe(apply)
+
+    voice.listen(ChestListener(MODEL, on_hit, on_command, on_thanks),
                  after=lambda exc: exc and log.error("listener stopped: %s", exc))
     s.sync_clocks()
     words = ", ".join(f"**{w}**" for w in CFG["trigger_words"])
@@ -881,12 +1075,13 @@ def delete_game(no: int, guild_id: int | None) -> dict | None:
     conn = g.get("conn", g.get("session"))  # older records stored the listening-run id as "session"
     live = next((s for s in sessions.values() if s.conn_id == conn), None)
     for uid, pp in g.get("per_player", {}).items():
-        if live and live.remove_game_time(int(uid), pp["chests"], pp["seconds"]):
+        if live and live.remove_game_time(int(uid), pp["chests"], pp["seconds"], pp.get("thanks", 0)):
             continue  # played during this listening run: not folded into lifetime yet, so fix it live
-        life = STATS.lifetime.get(uid)  # earlier night: already folded into all-time totals
+        life = STATS.lifetime.get(uid)  # earlier listening run: already folded into all-time totals
         if life:
             life["chests"] = max(0, life["chests"] - pp["chests"])
             life["seconds"] = max(0.0, life["seconds"] - pp["seconds"])
+            life["thanks"] = max(0, life.get("thanks", 0) - pp.get("thanks", 0))
     here = sessions.get(guild_id)
     STATS.save(here.snapshot() if here else None)
     return g
@@ -953,7 +1148,25 @@ async def stats(inter: discord.Interaction):
                       color=discord.Color.gold())
     if rows:
         e.add_field(name="Squad overall", value=squad_line(rows.values()), inline=False)
+    if rows and CFG["thank_claude"]:
+        name, value = thanks_field(rows, "all-time")
+        e.add_field(name=name, value=value, inline=False)
     e.set_footer(text=f"Best counts sessions of {CFG['min_best_minutes']}+ minutes.")
+    await inter.response.send_message(embed=e, allowed_mentions=NO_PINGS)
+
+
+@tree.command(description="All-time thank-you leaderboard (needs thank_claude in config.json)")
+async def thanks(inter: discord.Interaction):
+    if not CFG["thank_claude"]:
+        return await inter.response.send_message(
+            "Thank-you counting is off. Set `\"thank_claude\": true` in config.json and restart the bot.",
+            ephemeral=True)
+    rows = overall(sessions.get(inter.guild_id))
+    total = sum(r.get("thanks", 0) for r in rows.values())
+    e = discord.Embed(title="🙏 Thanks to Claude", color=discord.Color.blurple(),
+                      description="\n".join(thanks_lines(rows)) or "Nobody has said thank you yet.")
+    e.add_field(name="Squad all-time (during games)", value=f"**{total}** thank-yous", inline=False)
+    e.add_field(name="Claude's tally (thanks.md)", value=f"**{read_thanks()}** thank-yous", inline=False)
     await inter.response.send_message(embed=e, allowed_mentions=NO_PINGS)
 
 

@@ -19,6 +19,9 @@ recorded, saved or sent anywhere.
 - 🏁 **End-of-game graph.** Say "end game" to get a chart of the squad's chests over that game, plus a bar chart of every game you've ever played.
 - 😬 **Tonight's biggest loser.** After every game, the bot calls out whoever had the lowest chests per minute in that game.
 - 🗂️ **Sessions and all-time stats.** Games less than an hour apart count as one session. All-time stats and game history are kept across restarts.
+- 🙏 **Thank Claude (optional, off by default).** Say "thank you" or "thanks" and it counts as a thank-you to Claude, the AI
+  assistant that helped build this bot. Turning it on adds a thank-you leaderboard, a thanks graph after every game
+  and **Tonight's biggest meanie**. See [Thanking Claude](#thanking-claude-optional).
 - 🗑️ **Fix mistakes.** `/undo` and `/add` correct the count, and `/deletegame` removes a game that shouldn't count.
 
 ---
@@ -125,6 +128,7 @@ Leave that window open while you play. Close it, or press `Ctrl+C`, to stop the 
 | `/add [member]` | Add one chest the bot missed. Defaults to you. |
 | `/stats` | All-time stats for every player, plus a squad total. |
 | `/games` | List recent games with their numbers. |
+| `/thanks` | All-time thank-you leaderboard and Claude's tally. Needs `thank_claude` on. |
 | `/deletegame <number>` | Delete a game. You'll be asked to confirm. Its chests and time come off everyone's stats. |
 | `/stop` | Stop listening, save stats and leave voice. |
 
@@ -143,6 +147,9 @@ Leave that window open while you play. Close it, or press `Ctrl+C`, to stop the 
   stream of them.
 - **Tonight's biggest loser.** The player with the lowest chests/min in the game that just ended. It needs
   at least 2 players who each played a minute or more. The name is a joke and applies to every game.
+- **Tonight's biggest meanie** (with `thank_claude` on). The player who thanked Claude the fewest times in
+  the game that just ended. It uses the same eligibility rules as the biggest loser, names everyone who's tied, and
+  calls out **everyone** if nobody said thank you at all.
 - **Best.** A player's best chests/min over a single `/start`…`/stop` run of 3+ minutes.
 - **Game numbers.** Every game gets a permanent all-time number (shown on the graph and in `/games`). Numbers
   aren't reused after a deletion.
@@ -175,6 +182,25 @@ cp config.example.json config.json      # Windows: copy config.example.json conf
 | `drop_min_chests` | `4` | Chests needed before pace drops are checked. |
 | `min_best_minutes` | `3` | Shortest session that can count as a "best". |
 | `board_update_seconds` | `10` | How often the live leaderboard refreshes. |
+| `thank_claude` | `false` | Set to `true` to count "thank you"s and "thanks" as thanks to Claude. See below. |
+
+Keys starting with `_`, like `_thank_claude` in the example, are notes. The bot ignores them.
+
+### Thanking Claude (optional)
+
+cpm-tracker was built with help from [Claude](https://claude.ai), Anthropic's AI assistant. To let your squad
+say thanks, set `"thank_claude": true` in `config.json` and restart the bot. Then:
+
+- Every **"thank you"** or **"thanks"** said in voice while the bot is listening adds one to Claude's tally in `thanks.md`, a
+  small file next to `bot.py`. It holds only the number. If you use Claude Code in this folder, Claude can read it.
+- Thank-yous said **during a game** also count for the player who said them. They show up in a "🙏 Thanks to
+  Claude" section on the live board and in `/stats`, and in the `/thanks` leaderboard.
+- After each game, a second graph shows the squad's thank-yous over that game and the thank-yous per game
+  across every game played with the setting on. **😠 Tonight's biggest meanie** goes to whoever thanked
+  Claude the least.
+
+It's off by default because the recogniser then listens for "thank", "you" and "thanks" too, and those are easy
+to say without meaning it.
 
 ---
 
@@ -182,10 +208,10 @@ cp config.example.json config.json      # Windows: copy config.example.json conf
 
 - **Audio never leaves your computer.** The bot hears each speaker's voice separately, turns it into text
   locally with Vosk and throws the audio away. Nothing is recorded or saved.
-- The recogniser only listens for the trigger words plus "start", "end" and "game". It isn't transcribing
-  your conversations.
+- The recogniser only listens for the trigger words plus "start", "end" and "game", and also "thank", "you"
+  and "thanks" if `thank_claude` is on. It isn't transcribing your conversations.
 - **What is saved** (in `stats.json`, on your computer only): each player's Discord display name and user ID,
-  their chest counts and play time, and a summary of each game.
+  their chest counts, play time and thank-yous, and a summary of each game. `thanks.md` holds only a number.
 - **Tell your friends the bot is listening** before you use it.
 - `.env` (your token), `config.json` (your settings) and `stats.json` (your friends' data) are listed in
   `.gitignore`, so they won't be committed if you fork this repository. Only the `*.example` templates are
@@ -236,4 +262,5 @@ cp config.example.json config.json      # Windows: copy config.example.json conf
 | `.env` | Your bot token and server ID. Created on first run and **not committed**. |
 | `config.json` | Your optional setting overrides. **Not committed**. |
 | `stats.json` | Saved stats. Created automatically and **not committed**. |
+| `thanks.md` | Claude's thank-you tally. Created when `thank_claude` is on and **not committed**. |
 | `models/` | The downloaded speech model. Not committed. |

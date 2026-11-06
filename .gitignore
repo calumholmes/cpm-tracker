@@ -7,6 +7,9 @@ config.json
 # Everyone's Discord names, user IDs and game history
 stats.json
 stats.tmp
+# Your squad's thank-you tally for Claude (written by the bot when thank_claude is on)
+thanks.md
+thanks.tmp
 
 # --- Generated / downloaded ---
 .venv/
